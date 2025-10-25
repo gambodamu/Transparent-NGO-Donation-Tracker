@@ -59,6 +59,11 @@
     uint
 )
 
+(define-map admins
+    principal
+    bool
+)
+
 (define-map ngo-campaigns
     principal
     (list 50 uint)
@@ -100,6 +105,10 @@
 
 (define-read-only (get-ngo-campaigns (ngo principal))
     (default-to (list) (map-get? ngo-campaigns ngo))
+)
+
+(define-read-only (is-admin (who principal))
+    (default-to false (map-get? admins who))
 )
 
 (define-read-only (is-campaign-active (campaign-id uint))
@@ -157,9 +166,23 @@
     )
 )
 
-(define-public (verify-ngo (ngo principal))
+(define-public (set-admin
+        (who principal)
+        (enabled bool)
+    )
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (map-set admins who enabled)
+        (ok enabled)
+    )
+)
+
+(define-public (verify-ngo (ngo principal))
+    (begin
+        (asserts!
+            (or (is-eq tx-sender (var-get contract-owner)) (is-admin tx-sender))
+            ERR-UNAUTHORIZED
+        )
         (asserts! (is-some (map-get? ngos ngo)) ERR-NOT-REGISTERED)
         (map-set ngos ngo
             (merge (unwrap-panic (map-get? ngos ngo)) { verified: true })
@@ -299,9 +322,13 @@
 
 (define-read-only (get-active-campaigns)
     (filter is-campaign-active-by-id
-        (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19
-            u20)
-    )
+        (list
+            u1             u2             u3             u4             u5
+                        u6             u7             u8             u9             u10
+                        u11             u12             u13             u14             u15
+                        u16             u17             u18             u19
+            u20
+        ))
 )
 
 (define-read-only (is-campaign-active-by-id (campaign-id uint))
