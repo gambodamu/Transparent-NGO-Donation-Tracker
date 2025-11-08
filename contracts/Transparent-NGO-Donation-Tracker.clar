@@ -6,10 +6,14 @@
 (define-constant ERR-NOT-REGISTERED (err u105))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u106))
 (define-constant ERR-WITHDRAWAL-FAILED (err u107))
+(define-constant ERR-MILESTONE-NOT-FOUND (err u108))
+(define-constant ERR-MILESTONE-ALREADY-COMPLETED (err u109))
+(define-constant ERR-NO-MILESTONES (err u110))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var campaign-counter uint u0)
 (define-data-var total-donations uint u0)
+(define-data-var milestone-counter uint u0)
 
 (define-map ngos
     principal
@@ -69,6 +73,30 @@
     (list 50 uint)
 )
 
+(define-map milestones
+    uint
+    {
+        campaign-id: uint,
+        title: (string-ascii 100),
+        description: (string-ascii 500),
+        target-percentage: uint,
+        amount-to-release: uint,
+        completed: bool,
+        completion-block: uint,
+        verified-by: (optional principal),
+    }
+)
+
+(define-map campaign-milestones
+    uint
+    (list 20 uint)
+)
+
+(define-map campaign-escrow
+    uint
+    uint
+)
+
 (define-read-only (get-contract-owner)
     (var-get contract-owner)
 )
@@ -109,6 +137,18 @@
 
 (define-read-only (is-admin (who principal))
     (default-to false (map-get? admins who))
+)
+
+(define-read-only (get-milestone-info (milestone-id uint))
+    (map-get? milestones milestone-id)
+)
+
+(define-read-only (get-campaign-milestones (campaign-id uint))
+    (default-to (list) (map-get? campaign-milestones campaign-id))
+)
+
+(define-read-only (get-campaign-escrow-balance (campaign-id uint))
+    (default-to u0 (map-get? campaign-escrow campaign-id))
 )
 
 (define-read-only (is-campaign-active (campaign-id uint))
@@ -246,13 +286,23 @@
             (new-campaign-amount (+ (get current-amount campaign) amount))
             (current-donor-total (get-donor-total sender))
             (current-donor-count (get-campaign-donor-count campaign-id))
+            (has-milestones (> (len (get-campaign-milestones campaign-id)) u0))
+            (destination (if has-milestones
+                (as-contract tx-sender)
+                (get wallet (unwrap-panic (map-get? ngos ngo-addr)))
+            ))
         )
         (asserts! (> amount u0) ERR-INVALID-AMOUNT)
         (asserts! (is-campaign-active campaign-id) ERR-CAMPAIGN-INACTIVE)
 
-        (try! (stx-transfer? amount sender
-            (get wallet (unwrap-panic (map-get? ngos ngo-addr)))
-        ))
+        (try! (stx-transfer? amount sender destination))
+
+        (if has-milestones
+            (map-set campaign-escrow campaign-id
+                (+ (get-campaign-escrow-balance campaign-id) amount)
+            )
+            true
+        )
 
         (map-set donations {
             donor: sender,
@@ -273,8 +323,13 @@
             true
         )
 
-        (map-set ngos ngo-addr
-            (merge (unwrap-panic (map-get? ngos ngo-addr)) { total-raised: (+ (get total-raised (unwrap-panic (map-get? ngos ngo-addr))) amount) })
+        (if (not has-milestones)
+            (map-set ngos ngo-addr
+                (merge (unwrap-panic (map-get? ngos ngo-addr)) { total-raised: (+ (get total-raised (unwrap-panic (map-get? ngos ngo-addr)))
+                    amount
+                ) }
+                ))
+            true
         )
 
         (var-set total-donations (+ (var-get total-donations) amount))
@@ -324,9 +379,9 @@
     (filter is-campaign-active-by-id
         (list
             u1             u2             u3             u4             u5
-                        u6             u7             u8             u9             u10
-                        u11             u12             u13             u14             u15
-                        u16             u17             u18             u19
+            u6             u7             u8             u9             u10
+            u11             u12             u13             u14             u15
+            u16             u17             u18             u19
             u20
         ))
 )
@@ -341,4 +396,80 @@
         total-donations: (var-get total-donations),
         active-campaigns: (len (get-active-campaigns)),
     }
+)
+
+(define-public (create-milestone
+        (campaign-id uint)
+        (title (string-ascii 100))
+        (description (string-ascii 500))
+        (target-percentage uint)
+        (amount-to-release uint)
+    )
+    (let (
+            (sender tx-sender)
+            (campaign (unwrap! (map-get? campaigns campaign-id) ERR-CAMPAIGN-NOT-FOUND))
+            (milestone-id (+ (var-get milestone-counter) u1))
+            (current-milestones (get-campaign-milestones campaign-id))
+        )
+        (asserts! (is-eq sender (get ngo campaign)) ERR-UNAUTHORIZED)
+        (asserts! (> (len title) u0) ERR-INVALID-AMOUNT)
+        (asserts! (<= target-percentage u100) ERR-INVALID-AMOUNT)
+        (asserts! (> amount-to-release u0) ERR-INVALID-AMOUNT)
+
+        (map-set milestones milestone-id {
+            campaign-id: campaign-id,
+            title: title,
+            description: description,
+            target-percentage: target-percentage,
+            amount-to-release: amount-to-release,
+            completed: false,
+            completion-block: u0,
+            verified-by: none,
+        })
+
+        (map-set campaign-milestones campaign-id
+            (unwrap-panic (as-max-len? (append current-milestones milestone-id) u20))
+        )
+        (var-set milestone-counter milestone-id)
+        (ok milestone-id)
+    )
+)
+
+(define-public (verify-and-release-milestone (milestone-id uint))
+    (let (
+            (sender tx-sender)
+            (milestone (unwrap! (map-get? milestones milestone-id) ERR-MILESTONE-NOT-FOUND))
+            (campaign-id (get campaign-id milestone))
+            (campaign (unwrap! (map-get? campaigns campaign-id) ERR-CAMPAIGN-NOT-FOUND))
+            (ngo-addr (get ngo campaign))
+            (ngo-wallet (get wallet (unwrap-panic (map-get? ngos ngo-addr))))
+            (release-amount (get amount-to-release milestone))
+            (escrow-balance (get-campaign-escrow-balance campaign-id))
+        )
+        (asserts! (or (is-eq sender (var-get contract-owner)) (is-admin sender))
+            ERR-UNAUTHORIZED
+        )
+        (asserts! (not (get completed milestone)) ERR-MILESTONE-ALREADY-COMPLETED)
+        (asserts! (>= escrow-balance release-amount) ERR-INSUFFICIENT-FUNDS)
+
+        (try! (as-contract (stx-transfer? release-amount tx-sender ngo-wallet)))
+
+        (map-set campaign-escrow campaign-id (- escrow-balance release-amount))
+
+        (map-set milestones milestone-id
+            (merge milestone {
+                completed: true,
+                completion-block: stacks-block-height,
+                verified-by: (some sender),
+            })
+        )
+
+        (map-set ngos ngo-addr
+            (merge (unwrap-panic (map-get? ngos ngo-addr)) { total-raised: (+ (get total-raised (unwrap-panic (map-get? ngos ngo-addr)))
+                release-amount
+            ) }
+            ))
+
+        (ok true)
+    )
 )
